@@ -1,7 +1,10 @@
 """this file is for primary module testing only using sample pdfs provided in aws s3"""
 
 
-from tier3_processor import process_low_confidence_regions
+try:
+    from .tier3_processor import process_low_confidence_regions
+except ImportError:
+    from tier3_processor import process_low_confidence_regions
 from pdf2image import convert_from_path
 print("RUNNING TEST...")
 # -------- STEP 1: LOAD PDF --------

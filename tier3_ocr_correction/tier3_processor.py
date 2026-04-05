@@ -41,15 +41,16 @@ from typing import Any
 from PIL import Image
 
 try:
-    from .audit_logger    import audit_logging, build_audit_log_for_skipped_region
-    from .bedrock_client  import bedrock_call
-    from .config          import (
+    from .audit_logger         import audit_logging, build_audit_log_for_skipped_region
+    from .bedrock_client       import bedrock_call
+    from .config               import (
         DEFAULT_OCR_CONFIDENCE_THRESHOLD,
         LLM_CONFIDENCE_GATE,
         ReasonCode,
     )
     from .hallucination_detector import hallucination_detection, has_dosage_change
-    from .span_merger     import merge_spans
+    from .span_merger          import merge_spans
+    from .dynamodb_integration import write_audit_batch_to_dynamodb
 except ImportError:
     # Fallback for direct execution or tests
     from audit_logger    import audit_logging, build_audit_log_for_skipped_region
@@ -61,6 +62,7 @@ except ImportError:
     )
     from hallucination_detector import hallucination_detection, has_dosage_change
     from span_merger     import merge_spans
+    from dynamodb_integration import write_audit_batch_to_dynamodb
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +94,8 @@ def process_low_confidence_regions(
     page_image:              Image.Image,
     surrounding_context_text: str,
     confidence_threshold:    float = DEFAULT_OCR_CONFIDENCE_THRESHOLD,
+    dynamodb_table:          Any = None,
+    document_id:             str = "",
 ) -> dict[str, Any]:
     """
     Run the Tier 3 OCR correction pipeline over a list of low-confidence regions.
@@ -109,6 +113,11 @@ def process_low_confidence_regions(
                                   Will be token-limited before sending to the model.
         confidence_threshold:     Regions with confidence >= this value are skipped
                                   (default from config: 0.80).
+        dynamodb_table:           (Optional) Boto3 DynamoDB table resource for
+                                  ClinicalDocs_AuditLogs. If provided, all audit
+                                  entries are persisted after processing.
+        document_id:              (Optional) Document ID for DynamoDB audit trail.
+                                  Required if dynamodb_table is provided.
 
     Returns:
         {
@@ -379,8 +388,36 @@ def process_low_confidence_regions(
         overall_status, len(merged_regions), len(audit_log),
     )
 
-    return {
+    result = {
         "status":            overall_status,
         "corrected_regions": merged_regions,
         "audit_log":         audit_log,
     }
+
+    # -- Persist audit trail to DynamoDB (non-blocking) --------------------------
+    if dynamodb_table and document_id and audit_log:
+        try:
+            db_result = write_audit_batch_to_dynamodb(
+                audit_entries=audit_log,
+                document_id=document_id,
+                dynamodb_table=dynamodb_table,
+                user_id="TIER3_PROCESSOR",
+            )
+            result["audit_persistence"] = {
+                "succeeded": db_result["succeeded"],
+                "failed": db_result["failed"],
+            }
+            if db_result["failed"] > 0:
+                logger.warning(
+                    "Audit persistence: %d succeeded, %d failed for doc %s",
+                    db_result["succeeded"],
+                    db_result["failed"],
+                    document_id,
+                )
+        except Exception as e:
+            logger.error(
+                "Unexpected error during audit persistence: %s", e, exc_info=True
+            )
+            result["audit_persistence"] = {"error": str(e)}
+
+    return result
