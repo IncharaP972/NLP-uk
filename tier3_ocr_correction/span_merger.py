@@ -17,7 +17,7 @@ import logging
 from copy import deepcopy
 from typing import Any
 
-from config import ReasonCode
+from .config import ReasonCode
 
 logger = logging.getLogger(__name__)
 

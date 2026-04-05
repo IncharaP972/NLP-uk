@@ -27,8 +27,8 @@ Usage
     print(result["audit_log"])
 """
 
-from tier3_processor import process_low_confidence_regions  # noqa: F401
-from config import ReasonCode, DEFAULT_OCR_CONFIDENCE_THRESHOLD  # noqa: F401
+from .tier3_processor import process_low_confidence_regions  # noqa: F401
+from .config import ReasonCode, DEFAULT_OCR_CONFIDENCE_THRESHOLD  # noqa: F401
 
 __all__ = [
     "process_low_confidence_regions",

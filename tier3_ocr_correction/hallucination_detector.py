@@ -28,7 +28,7 @@ No third-party NLP libraries required — pure Python only.
 
 from __future__ import annotations
 import string
-from config import (
+from .config import (
     DOSAGE_TOKENS,
     HALLUCINATION_DEVIATION_THRESHOLD,
     HALLUCINATION_TOKEN_SIM_THRESHOLD,

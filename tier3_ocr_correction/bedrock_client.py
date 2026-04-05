@@ -35,7 +35,7 @@ import boto3
 from botocore.exceptions import ClientError
 from PIL import Image
 
-from config import (
+from .config import (
     AWS_REGION,
     BEDROCK_MODEL_ID,
     BEDROCK_CALL_TIMEOUT_SECONDS,

@@ -18,7 +18,7 @@ from __future__ import annotations
 import datetime
 from typing import Any
 
-from config import BEDROCK_MODEL_ID, ReasonCode
+from .config import BEDROCK_MODEL_ID, ReasonCode
 
 
 def audit_logging(
