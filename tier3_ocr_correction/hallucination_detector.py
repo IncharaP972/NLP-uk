@@ -28,13 +28,23 @@ No third-party NLP libraries required — pure Python only.
 
 from __future__ import annotations
 import string
-from .config import (
-    DOSAGE_TOKENS,
-    HALLUCINATION_DEVIATION_THRESHOLD,
-    HALLUCINATION_TOKEN_SIM_THRESHOLD,
-    SMALL_DEVIATION_THRESHOLD,
-    ReasonCode,
-)
+try:
+    from .config import (
+        DOSAGE_TOKENS,
+        HALLUCINATION_DEVIATION_THRESHOLD,
+        HALLUCINATION_TOKEN_SIM_THRESHOLD,
+        SMALL_DEVIATION_THRESHOLD,
+        ReasonCode,
+    )
+except ImportError:
+    # Fallback for direct execution
+    from config import (
+        DOSAGE_TOKENS,
+        HALLUCINATION_DEVIATION_THRESHOLD,
+        HALLUCINATION_TOKEN_SIM_THRESHOLD,
+        SMALL_DEVIATION_THRESHOLD,
+        ReasonCode,
+    )
 
 
 # ── Levenshtein distance (pure Python) ────────────────────────────────────────

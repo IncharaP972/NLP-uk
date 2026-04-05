@@ -40,15 +40,27 @@ from typing import Any
 
 from PIL import Image
 
-from .audit_logger    import audit_logging, build_audit_log_for_skipped_region
-from .bedrock_client  import bedrock_call
-from .config          import (
-    DEFAULT_OCR_CONFIDENCE_THRESHOLD,
-    LLM_CONFIDENCE_GATE,
-    ReasonCode,
-)
-from .hallucination_detector import hallucination_detection, has_dosage_change
-from .span_merger     import merge_spans
+try:
+    from .audit_logger    import audit_logging, build_audit_log_for_skipped_region
+    from .bedrock_client  import bedrock_call
+    from .config          import (
+        DEFAULT_OCR_CONFIDENCE_THRESHOLD,
+        LLM_CONFIDENCE_GATE,
+        ReasonCode,
+    )
+    from .hallucination_detector import hallucination_detection, has_dosage_change
+    from .span_merger     import merge_spans
+except ImportError:
+    # Fallback for direct execution or tests
+    from audit_logger    import audit_logging, build_audit_log_for_skipped_region
+    from bedrock_client  import bedrock_call
+    from config          import (
+        DEFAULT_OCR_CONFIDENCE_THRESHOLD,
+        LLM_CONFIDENCE_GATE,
+        ReasonCode,
+    )
+    from hallucination_detector import hallucination_detection, has_dosage_change
+    from span_merger     import merge_spans
 
 logger = logging.getLogger(__name__)
 

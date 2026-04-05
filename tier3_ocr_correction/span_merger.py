@@ -17,7 +17,11 @@ import logging
 from copy import deepcopy
 from typing import Any
 
-from .config import ReasonCode
+try:
+    from .config import ReasonCode
+except ImportError:
+    # Fallback for direct execution
+    from config import ReasonCode
 
 logger = logging.getLogger(__name__)
 

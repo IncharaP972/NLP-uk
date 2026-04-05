@@ -35,16 +35,29 @@ import boto3
 from botocore.exceptions import ClientError
 from PIL import Image
 
-from .config import (
-    AWS_REGION,
-    BEDROCK_MODEL_ID,
-    BEDROCK_CALL_TIMEOUT_SECONDS,
-    CONTEXT_MAX_TOKENS,
-    MAX_RESPONSE_TOKENS,
-    MAX_RETRIES,
-    RETRY_BASE_DELAY_SECONDS,
-    WORDS_PER_TOKEN_ESTIMATE,
-)
+try:
+    from .config import (
+        AWS_REGION,
+        BEDROCK_MODEL_ID,
+        BEDROCK_CALL_TIMEOUT_SECONDS,
+        CONTEXT_MAX_TOKENS,
+        MAX_RESPONSE_TOKENS,
+        MAX_RETRIES,
+        RETRY_BASE_DELAY_SECONDS,
+        WORDS_PER_TOKEN_ESTIMATE,
+    )
+except ImportError:
+    # Fallback for direct execution
+    from config import (
+        AWS_REGION,
+        BEDROCK_MODEL_ID,
+        BEDROCK_CALL_TIMEOUT_SECONDS,
+        CONTEXT_MAX_TOKENS,
+        MAX_RESPONSE_TOKENS,
+        MAX_RETRIES,
+        RETRY_BASE_DELAY_SECONDS,
+        WORDS_PER_TOKEN_ESTIMATE,
+    )
 
 logger = logging.getLogger(__name__)
 

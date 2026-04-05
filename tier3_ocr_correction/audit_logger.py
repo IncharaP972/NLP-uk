@@ -18,7 +18,11 @@ from __future__ import annotations
 import datetime
 from typing import Any
 
-from .config import BEDROCK_MODEL_ID, ReasonCode
+try:
+    from .config import BEDROCK_MODEL_ID, ReasonCode
+except ImportError:
+    # Fallback for direct execution
+    from config import BEDROCK_MODEL_ID, ReasonCode
 
 
 def audit_logging(

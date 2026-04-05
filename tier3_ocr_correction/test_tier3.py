@@ -184,7 +184,7 @@ class TestHallucinationDetection(unittest.TestCase):
         # Construct a case where deviation < 30% but token similarity < 50%
         # This is tricky; we simulate with direct mock instead.
         # Just test boundary: if token_sim < 0.5, it should be hallucinated.
-        from hallucination_detector import HALLUCINATION_TOKEN_SIM_THRESHOLD
+        from hallucination_detector import HALLUCINATION_TOKEN_SIM_THRESHOLD  # noqa: F401
         original  = "atorvastatin 20 mg"
         # Replace every word entirely: deviation will be high anyway, but let's verify rule fires
         corrected = "aspirin 81 tablet"
