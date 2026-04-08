@@ -27,7 +27,9 @@ protobuf>=3.20.0
 
 # For SNOMED and SQS (Track A Enhancement - PR #6)
 sentence-transformers>=1.2.0
-faiss-cpu>=1.7.0
 
 # Data Lake & Parquet (for S3 exports - PR #8)
 pyarrow>=14.0.0
+
+# FAISS for vector search (Track A & B - PR #6 & #9)
+faiss-cpu>=1.7.4
