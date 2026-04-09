@@ -33,3 +33,7 @@ pyarrow>=14.0.0
 
 # FAISS for vector search (Track A & B - PR #6 & #9)
 faiss-cpu>=1.7.4
+
+# Testing & coverage
+pytest>=8.2.0
+pytest-cov>=5.0.0
