@@ -1,0 +1,91 @@
+{
+  "templates": {
+    "medical_summarization": {
+      "description": "Core medical summarization system prompt for Track B.",
+      "active_version": "v1",
+      "bedrock_prompt_id": null,
+      "bedrock_prompt_arn": null,
+      "versions": {
+        "v1": {
+          "created_at": "2026-04-09T00:00:00Z",
+          "created_by": "SYSTEM",
+          "rationale": "Baseline medically precise summarization template.",
+          "template": "You are a medical summarization assistant generating a {role_label} output.\n\n{role_guidance}\n\n<document_type>{document_type}</document_type>\n{context_section}\n<clinical_document>\n{clinical_document}\n</clinical_document>\n\nGenerate a structured JSON summary using exactly this schema:\n{output_schema}\n"
+        },
+        "v2": {
+          "created_at": "2026-04-09T00:00:00Z",
+          "created_by": "SYSTEM",
+          "rationale": "Adds stronger ordering and contradiction checks for reproducibility.",
+          "template": "You are a senior clinical summarization assistant for {role_label} review.\nPreserve chronology, avoid contradictions, and keep medication details explicit.\n\n{role_guidance}\n\n<document_type>{document_type}</document_type>\n{context_section}\n<clinical_document>\n{clinical_document}\n</clinical_document>\n\nProduce strict JSON matching this schema (no markdown):\n{output_schema}\n"
+        }
+      }
+    },
+    "role_based_actions": {
+      "description": "Prompt segment for role-specific follow-up action generation.",
+      "active_version": "v1",
+      "bedrock_prompt_id": null,
+      "bedrock_prompt_arn": null,
+      "versions": {
+        "v1": {
+          "created_at": "2026-04-09T00:00:00Z",
+          "created_by": "SYSTEM",
+          "rationale": "Baseline action extraction guidance.",
+          "template": "Action generation policy for {role_label}:\n- Fill follow_up_actions with concise, practical actions.\n- Include only actions explicitly supported by source text.\n- Do not invent medications, dosages, diagnoses, or appointments.\n"
+        },
+        "v2": {
+          "created_at": "2026-04-09T00:00:00Z",
+          "created_by": "SYSTEM",
+          "rationale": "Improves action prioritization and review readiness.",
+          "template": "Role-action policy for {role_label}:\n- Prioritize urgent/safety-critical actions first.\n- Keep each follow_up_actions item measurable and reviewable.\n- If evidence is missing, return an empty action item list.\n"
+        }
+      }
+    },
+    "error_correction": {
+      "description": "Prompt segment to minimize hallucination and enforce correction policy.",
+      "active_version": "v1",
+      "bedrock_prompt_id": null,
+      "bedrock_prompt_arn": null,
+      "versions": {
+        "v1": {
+          "created_at": "2026-04-09T00:00:00Z",
+          "created_by": "SYSTEM",
+          "rationale": "Baseline anti-hallucination controls.",
+          "template": "Strict reliability rules:\n- Use only facts explicitly present in the document/context.\n- If data is missing, output \"Not specified\" or empty arrays.\n- Do not infer unsupported clinical facts.\n- Return valid JSON only.\n"
+        },
+        "v2": {
+          "created_at": "2026-04-09T00:00:00Z",
+          "created_by": "SYSTEM",
+          "rationale": "Adds explicit contradiction guardrails and confidence discipline.",
+          "template": "Reliability and correction controls:\n- Never contradict source text.\n- Reject unsupported assumptions; keep unknowns as Not specified.\n- Calibrate confidence_score conservatively when source data is incomplete.\n- Return valid JSON only.\n"
+        }
+      }
+    }
+  },
+  "ab_tests": {
+    "medical_summarization": {
+      "enabled": false,
+      "weights": {
+        "v1": 0.5,
+        "v2": 0.5
+      },
+      "salt": "trackb-medical-summary-exp"
+    },
+    "role_based_actions": {
+      "enabled": false,
+      "weights": {
+        "v1": 0.5,
+        "v2": 0.5
+      },
+      "salt": "trackb-role-actions-exp"
+    },
+    "error_correction": {
+      "enabled": false,
+      "weights": {
+        "v1": 0.5,
+        "v2": 0.5
+      },
+      "salt": "trackb-error-correction-exp"
+    }
+  },
+  "last_updated": "2026-04-09T00:00:00Z"
+}
