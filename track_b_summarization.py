@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import numpy as np
+from bedrock_prompt_management import BedrockPromptManager
 from hipaa_compliance import (
     build_phi_detection_summary,
     create_secure_client,
@@ -94,6 +95,7 @@ class SummaryOutput:
     validation_audit_log: List[Dict[str, Any]]
     auto_corrections: List[str]
     generation_time_ms: int
+    prompt_tracking: Dict[str, Any]
 
 
 class DocumentChunker:
@@ -434,8 +436,8 @@ class ClaudeSummarizer:
     Generates role-based summaries using Claude 3.5 Sonnet via Bedrock.
     """
 
-    # Role-specific prompt templates
-    ROLE_PROMPTS = {
+    # Role-specific guidance inserted into prompt templates.
+    ROLE_GUIDANCE = {
         SummaryRole.CLINICIAN: """You are a medical summarization assistant creating a clinical summary for a healthcare professional.
 
 Focus on:
@@ -505,54 +507,43 @@ Be thorough with medication details. Flag any potential issues."""
             region_name=AWS_REGION
         )
         self.model_id = BEDROCK_CLAUDE_MODEL
+        self.prompt_manager = BedrockPromptManager(
+            model_id=self.model_id,
+            region_name=AWS_REGION,
+        )
 
     def generate_summary(self,
                          document_text: str,
+                         document_id: str,
                          role: SummaryRole,
                          retrieved_context: List[str],
-                         document_type: DocumentType) -> Dict:
+                         document_type: DocumentType,
+                         forced_prompt_versions: Optional[Dict[str, str]] = None) -> Dict:
         """
         Generates a role-based summary using Claude 3.5 Sonnet.
 
         Args:
             document_text: Full document text
+            document_id: Document identifier used for deterministic A/B prompt assignment
             role: Target audience role
             retrieved_context: Retrieved relevant context from FAISS
             document_type: Type of document
+            forced_prompt_versions: Optional explicit template versions for debugging
 
         Returns:
             dict: Structured summary output
         """
-        role_prompt = self.ROLE_PROMPTS[role]
-
-        # Build context section
-        context_section = ""
-        if retrieved_context:
-            context_section = "\n\n<relevant_medical_context>\n"
-            for i, ctx in enumerate(retrieved_context[:3]):  # Top 3 contexts
-                context_section += f"{i+1}. {ctx}\n"
-            context_section += "</relevant_medical_context>"
-
-        # Build the full prompt
-        prompt = f"""{role_prompt}
-
-<document_type>{document_type.value}</document_type>
-{context_section}
-
-<clinical_document>
-{document_text[:6000]}
-</clinical_document>
-
-Generate a structured summary in JSON format following this exact schema:
-{json.dumps(self.OUTPUT_SCHEMA, indent=2)}
-
-Important:
-- Only include information explicitly stated in the document
-- If information is not available, use empty arrays or "Not specified"
-- Set confidence_score based on clarity and completeness of source data
-- Do not hallucinate or infer information not present
-
-Respond with valid JSON only, no additional text."""
+        role_guidance = self.ROLE_GUIDANCE[role]
+        prompt, prompt_tracking = self.prompt_manager.compose_track_b_prompt(
+            document_id=document_id,
+            role_key=role.value,
+            role_guidance=role_guidance,
+            document_type=document_type.value,
+            clinical_document=document_text,
+            retrieved_context=retrieved_context,
+            output_schema=self.OUTPUT_SCHEMA,
+            forced_versions=forced_prompt_versions,
+        )
 
         # Call Claude via Bedrock
         body = json.dumps({
@@ -580,6 +571,7 @@ Respond with valid JSON only, no additional text."""
                 response_text = json_match.group(1)
 
             summary_data = json.loads(response_text)
+            summary_data["prompt_tracking"] = prompt_tracking
             return summary_data
         except json.JSONDecodeError:
             # Return minimal valid structure on parse error
@@ -589,7 +581,8 @@ Respond with valid JSON only, no additional text."""
                 "medications": [],
                 "diagnoses": [],
                 "follow_up_actions": [],
-                "confidence_score": 0.5
+                "confidence_score": 0.5,
+                "prompt_tracking": prompt_tracking,
             }
 
 
@@ -718,10 +711,12 @@ class TrackBPipeline:
                 # Generate summary
                 summary_data = self.summarizer.generate_summary(
                     document_text=document_text,
+                    document_id=document_id,
                     role=role,
                     retrieved_context=retrieved_context,
                     document_type=doc_type
                 )
+                prompt_tracking = summary_data.get("prompt_tracking", {})
 
                 # Validate
                 is_valid, validation_errors = self.validator.validate(
@@ -729,6 +724,7 @@ class TrackBPipeline:
                 )
                 validation_report = self.validator.get_last_report()
                 corrected_summary = validation_report.get("corrected_output", summary_data)
+                corrected_summary["prompt_tracking"] = prompt_tracking
 
                 # Calculate hallucination score
                 hallucination_score = self.validator.calculate_hallucination_score(
@@ -762,7 +758,8 @@ class TrackBPipeline:
                     ocr_deviation_details=ocr_deviation.get('critical_term_results', []),
                     validation_audit_log=combined_audit_log,
                     auto_corrections=validation_report.get('auto_corrections', []),
-                    generation_time_ms=generation_time
+                    generation_time_ms=generation_time,
+                    prompt_tracking=prompt_tracking,
                 )
 
                 print(f"    Validation: {'PASSED' if is_valid else 'FAILED'}")
@@ -791,7 +788,8 @@ class TrackBPipeline:
                     ocr_deviation_details=[],
                     validation_audit_log=[],
                     auto_corrections=[],
-                    generation_time_ms=0
+                    generation_time_ms=0,
+                    prompt_tracking={},
                 )
 
         total_time = time.time() - start_time
@@ -869,6 +867,8 @@ class TrackBPipeline:
                     'validation_audit_log': output.validation_audit_log,
                     'auto_corrections': output.auto_corrections,
                     'generation_time_ms': output.generation_time_ms,
+                    'prompt_tracking': output.prompt_tracking,
+                    'prompt_versions': output.prompt_tracking.get("selected_versions", {}),
                     'generated_at': datetime.utcnow().isoformat() + 'Z',
                     'phi_detection': phi_summary,
                     'phi_masking_applied': apply_masking,
