@@ -62,7 +62,7 @@ import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent))
 from config.document_type_config import get_threshold as _get_threshold
 
-CONFIDENCE_THRESHOLD = 0.85  # global fallback (matches config default)
+CONFIDENCE_THRESHOLD = 0.72  # global fallback — calibrated to real AWS output ranges
 
 # OBS-010: Arrival method codes from Frimley ED discharge letters.
 # Codes appear in brackets e.g. "Emergency Road Ambulance WITH Medical Escort [8]"
@@ -256,13 +256,20 @@ Extracted clinical entities:
 - Diagnoses: {', '.join(diagnoses) or 'None identified'}"""
 
     def call_claude(prompt: str, max_tokens: int = 500) -> str:
+        # Tell Claude explicitly to avoid markdown so summaries render cleanly
+        clean_prompt = prompt + "\n\nIMPORTANT: Write in plain prose only. Do NOT use markdown formatting — no asterisks, no bold (**), no bullet dashes, no numbered lists with dots. Use plain sentences and line breaks only."
         body = json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": [{"role": "user", "content": clean_prompt}]
         })
         resp = client.invoke_model(modelId=MODEL, body=body, contentType="application/json")
-        return json.loads(resp["body"].read())["content"][0]["text"].strip()
+        raw = json.loads(resp["body"].read())["content"][0]["text"].strip()
+        # Strip any residual markdown just in case
+        import re as _re
+        clean = _re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', raw)  # remove **bold** / *italic*
+        clean = _re.sub(r'^#{1,3}\s+', '', clean, flags=_re.MULTILINE)  # remove # headers
+        return clean
 
     # ── Type-specific clinician prompt ─────────────────────────────────────────
     if "111" in letter_type:
@@ -370,9 +377,25 @@ Extracted clinical entities:
     }
 
 
-def compute_unified_confidence(textract_conf: float, snomed_conf: float, llm_conf: float) -> float:
-    """Weighted unified confidence score (SRS Section 3.4)."""
-    return (0.35 * textract_conf) + (0.30 * snomed_conf) + (0.35 * llm_conf)
+def compute_unified_confidence(
+    textract_conf: float,
+    snomed_conf: float,
+    llm_conf: float,
+    letter_type: str = "",
+) -> float:
+    """Weighted unified confidence score (SRS Section 3.4).
+
+    Default weights: Textract 40% + LLM 40% + SNOMED 20%.
+
+    For Ambulance and 111 reports, SNOMED entities are typically absent because
+    the text is in all-caps multi-column tables that Comprehend Medical cannot
+    parse reliably. For these types we use Textract 50% + LLM 50% and ignore
+    SNOMED, preventing false 'review required' flags.
+    """
+    if letter_type in ("Ambulance Clinical Report", "111 First ED Report"):
+        # SNOMED unreliable for all-caps/table-heavy formats — use Textract + LLM only
+        return (0.50 * textract_conf) + (0.50 * llm_conf)
+    return (0.40 * textract_conf) + (0.20 * snomed_conf) + (0.40 * llm_conf)
 
 
 def get_confidence_threshold(letter_type: str) -> float:
@@ -425,77 +448,85 @@ def resolve_arrival_method(text: str) -> str:
 
 
 def infer_letter_type(text: str) -> str:
-    """Classify letter type based on all 23 observed document patterns (batches 1-3)."""
+    """Classify letter type based on all 21 observed document patterns (batches 1-5).
+    Priority order: most specific/distinct signals first to prevent false matches.
+    """
     t = text.lower()
-    # SCAS Ambulance Clinical Reports (prefix 5.) — check FIRST, very distinct
+    # ── Highest specificity first ────────────────────────────────────────────
+    # SCAS Ambulance Clinical Reports — very distinct vocabulary
     if any(x in t for x in ["south central ambulance service", "patient clinical report",
                               "gp patient report v3", "scas clinician", "news2 score",
                               "pops score", "nature of call", "incident number",
                               "conveyance", "at patient side"]):
         return "Ambulance Clinical Report"
-    # ED Discharge Letters (prefix 4.) — emergency dept specific, before generic discharge
+    # Ophthalmology Referral — Evolutio / eRefer (must come before generic referral catch)
+    if any(x in t for x in ["evolutio ophthalmology", "evolutio care innovations",
+                              "patient ophthalmology referral", "east berkshire community eye service",
+                              "erefer referral", "referral id number", "triager action required",
+                              "odtc.co.uk", "epiretinal membrane", "specsavers"]):
+        return "Ophthalmology Referral"
+    # Ophthalmology Outpatient / Medical Retina (must come before generic ophthalmology)
+    if any(x in t for x in ["diabetic retinopathy", "medical retina",
+                              "proliferative retinopathy", "macular oedema",
+                              "intraocular pressure", "fundus exam", "prp", "panretinal",
+                              "neovascularisation", "nvd", "nve", "slit lamp"]):
+        return "Ophthalmology Letter"
+    # Expert Health / GLP-1 prescribing — very distinct brand names
+    if any(x in t for x in ["expert health", "notification of consultation", "kwikpen",
+                              "weight management", "glp-1", "mounjaro", "semaglutide",
+                              "ozempic", "wegovy", "weight loss programme"]):
+        return "Medication / Prescriber Letter"
+    # ED Discharge Letters — emergency dept specific, before generic discharge
     if any(x in t for x in ["frimley emergency", "patient discharge letter",
                               "attendance reason", "arrival method", "source of referral",
                               "mode of arrival", "presenting complaint:", "place of accident"]):
         return "ED Discharge Letter"
-    # 111 First ED Reports (prefix 3.)
+    # 111 First ED Reports
     if any(x in t for x in ["111 first ed report", "nhs111 encounter", "pathways disposition",
                               "pathways assessment", "attendance activity", "111 first"]):
         return "111 First ED Report"
-    # Cancer surveillance (prefix 2.)
-    if any(x in t for x in ["surveillance", "adenocarcinoma", "hemicolectomy", "colorectal surveillance",
-                              "tnm", "cea", "chemotherapy", "oncology"]):
-        return "Cancer Surveillance Letter"
-    # HIV / GUM / Sexual health (prefix 2.)
-    if any(x in t for x in ["hiv", "gum clinic", "garden clinic", "sexual health", "antiretroviral",
-                              "cd4", "viral load", "art regimen", "dolutegravir", "tenofovir"]):
-        return "HIV / GUM Clinic Letter"
-    # Antenatal Discharge Summary (prefix 7.) — specific maternity variant, check before generic maternity
-    if any(x in t for x in ["antenatal discharge", "estimate delivery date", "estimate gestational age",
-                              "gravida & parity", "reduced fetal movement", "mdau",
-                              "antenatal discharge summary"]):
-        return "Antenatal Discharge Summary"
-    # Maternity / diabetes (prefix 2.)
-    if any(x in t for x in ["gestational diabetes", "antenatal", "maternity", "glucose tolerance",
-                              "pip code", "blood glucose monitoring", "midwives"]):
-        return "Maternity / Diabetes Letter"
-    # Pre-op surgical outpatient (prefix 2.)
-    if any(x in t for x in ["hernia", "supra-umbilical", "upper gi", "open repair", "mesh repair",
-                              "brachioplasty", "pre-op", "pre op", "surgical consent"]):
-        return "Surgical Outpatient Letter"
-    # Procedure / endoscopy reports (prefix 10.)
-    if any(x in t for x in ["endoscopy", "ogd", "colonoscopy", "gastroscopy", "oesophageal",
-                              "colonography", "procedure report", "endoscopist"]):
-        return "Procedure Report"
-    # Mental Health Inpatient Discharge (prefix 7.) — check BEFORE generic discharge summary
+    # Mental Health Inpatient Discharge — check BEFORE generic discharge summary
     if any(x in t for x in ["mental health inpatient discharge", "prospect park hospital",
                               "crhtt", "cmht", "snowdrop ward", "section 2", "section 3",
                               "mental health act", "inpatient consultant"]):
         return "Mental Health Inpatient Discharge"
-    # CAMHS / paediatric mental health (prefix 1.)
+    # Antenatal Discharge Summary — check BEFORE generic maternity
+    if any(x in t for x in ["antenatal discharge", "estimate delivery date", "estimate gestational age",
+                              "gravida & parity", "reduced fetal movement", "mdau",
+                              "antenatal discharge summary"]):
+        return "Antenatal Discharge Summary"
+    # Cancer surveillance
+    if any(x in t for x in ["surveillance", "adenocarcinoma", "hemicolectomy", "colorectal surveillance",
+                              "tnm", "cea", "chemotherapy", "oncology"]):
+        return "Cancer Surveillance Letter"
+    # HIV / GUM / Sexual health
+    if any(x in t for x in ["hiv", "gum clinic", "garden clinic", "sexual health", "antiretroviral",
+                              "cd4", "viral load", "art regimen", "dolutegravir", "tenofovir"]):
+        return "HIV / GUM Clinic Letter"
+    # Maternity / diabetes
+    if any(x in t for x in ["gestational diabetes", "antenatal", "maternity", "glucose tolerance",
+                              "pip code", "blood glucose monitoring", "midwives"]):
+        return "Maternity / Diabetes Letter"
+    # Pre-op surgical outpatient
+    if any(x in t for x in ["hernia", "supra-umbilical", "upper gi", "open repair", "mesh repair",
+                              "brachioplasty", "pre-op", "pre op", "surgical consent"]):
+        return "Surgical Outpatient Letter"
+    # Procedure / endoscopy reports
+    if any(x in t for x in ["endoscopy", "ogd", "colonoscopy", "gastroscopy", "oesophageal",
+                              "colonography", "procedure report", "endoscopist"]):
+        return "Procedure Report"
+    # CAMHS / paediatric mental health
     if any(x in t for x in ["camhs", "child and adolescent", "mental health service",
                               "brief psychosocial intervention", "bpi"]):
         return "CAMHS Discharge Summary"
-    # Discharge summaries (prefix 1.)
+    # Generic discharge summaries
     if any(x in t for x in ["discharge summary", "discharge date", "discharging consultant",
                               "length of stay", "discharge summary completed by"]):
         return "Discharge Summary"
-    # Psychiatry outpatient (prefix 10.)
+    # Psychiatry outpatient
     if any(x in t for x in ["psychiatrist", "psychiatric", "bipolar", "icd10", "icd-10",
                               "quetiapine", "lisdexamfetamine", "consultant psychiatrist"]):
         return "Psychiatry Outpatient Letter"
-    # Ophthalmology Referral — Evolutio / eRefer (prefix 8/9)
-    if any(x in t for x in ["evolutio ophthalmology", "evolutio care innovations",
-                              "patient ophthalmology referral", "east berkshire community eye service",
-                              "erefer referral", "referral id number", "triager action required",
-                              "odtc.co.uk"]):
-        return "Ophthalmology Referral"
-    # Ophthalmology Outpatient / Medical Retina (prefix 8)
-    if any(x in t for x in ["diabetic retinopathy", "medical retina", "ophthalmology",
-                              "proliferative retinopathy", "macular oedema", "visual acuity",
-                              "intraocular pressure", "iop", "fundus exam", "prp", "panretinal",
-                              "neovascularisation", "nvd", "nve", "slit lamp", "ophthalmic"]):
-        return "Ophthalmology Letter"
     # Renal / Nephrology Letter (prefix 6.)
     if any(x in t for x in ["nephrologist", "nephrology", "berkshire kidney",
                               "egfr", "creatinine", "renal medicine", "albumin creatinine ratio",
@@ -1143,7 +1174,7 @@ def run_full_pipeline(doc_id: str, upload_path: Path) -> dict:
         return result
 
     # ── Confidence aggregation ─────────────────────────────────────────────────
-    unified    = compute_unified_confidence(textract_conf, snomed["snomed_confidence"], summaries["llm_confidence"])
+    unified    = compute_unified_confidence(textract_conf, snomed["snomed_confidence"], summaries["llm_confidence"], letter_type)
     # OBS-004: Use per-type threshold — ambulance/ophthalmology referral docs legitimately score lower
     type_threshold = get_confidence_threshold(letter_type)
     result["unified_confidence"]   = round(unified, 3)
@@ -1443,7 +1474,7 @@ body{background:var(--bg);color:var(--text);min-height:100vh}
         <!-- DETAILS TAB -->
         <div class="tab-pane active" id="tab-details">
           <div id="review-alert" class="alert alert-warn" style="display:none">
-            ⚠️ Confidence below threshold — manual review recommended for highlighted fields
+            ⚠️ Confidence below threshold — outputs generated, please review before approving
           </div>
           <div id="auto-alert" class="alert alert-success" style="display:none">
             ✅ High confidence — document auto-processed successfully
@@ -1454,6 +1485,28 @@ body{background:var(--bg);color:var(--text);min-height:100vh}
             <div class="summary-box" id="summary-clinician">
               <button class="copy-btn" onclick="copyText('summary-clinician')" title="Copy">📋</button>
               Loading...
+            </div>
+          </div>
+
+          <!-- SNOMED section inline on Details tab -->
+          <div class="field-group" style="margin-top:12px">
+            <div class="field-label" style="display:flex;align-items:center;justify-content:space-between">
+              <span>SNOMED CT Entities</span>
+              <span id="snomed-conf-badge" style="font-size:11px;color:var(--muted);font-weight:400"></span>
+            </div>
+            <div style="background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:4px">
+              <div style="margin-bottom:6px">
+                <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">🔴 Problems / Diagnoses</div>
+                <div id="detail-chips-problems" style="min-height:24px"></div>
+              </div>
+              <div style="margin-bottom:6px;border-top:1px solid var(--border);padding-top:6px">
+                <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">💊 Medications</div>
+                <div id="detail-chips-medications" style="min-height:24px"></div>
+              </div>
+              <div style="border-top:1px solid var(--border);padding-top:6px">
+                <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">🩺 Confirmed Diagnoses</div>
+                <div id="detail-chips-diagnoses" style="min-height:24px"></div>
+              </div>
             </div>
           </div>
 
@@ -1526,7 +1579,7 @@ body{background:var(--bg);color:var(--text);min-height:100vh}
                 <div class="conf-bar-wrap"><div id="conf-bar" class="conf-bar conf-high" style="width:0%"></div></div>
               </div>
             </div>
-            <div style="font-size:12px;color:var(--muted);margin-top:4px">Threshold: 0.85 | Textract + SNOMED + LLM weighted</div>
+            <div id="conf-threshold-label" style="font-size:12px;color:var(--muted);margin-top:4px">Threshold: 85% | Textract + SNOMED + LLM weighted</div>
           </div>
         </div>
 
@@ -1705,18 +1758,33 @@ function renderResult(data, file) {
 
   document.getElementById('doc-filename').textContent = data.filename || file.name;
 
-  // Status badge
+  // Status badge — confidence is a QUALITY INDICATOR, not a gate.
+  // Summaries and actions are ALWAYS generated (project letter D3/D5/D7).
+  // The badge communicates trust level to the clinician for their review.
   const statusEl = document.getElementById('doc-status-badge');
   const diStatus = document.getElementById('di-status');
-  if(data.status === 'processed') {
-    statusEl.className = 'badge badge-processed'; statusEl.textContent = 'Processed';
-    diStatus.innerHTML = '<span class="badge badge-processed">Processed</span>';
+  const conf      = data.unified_confidence || 0;
+  const threshold = data.confidence_threshold || 0.75;
+  const confPct   = Math.round(conf * 100);
+
+  if (conf >= threshold) {
+    statusEl.className = 'badge badge-processed';
+    statusEl.textContent = '✅ High Confidence (' + confPct + '%)';
+    diStatus.innerHTML = '<span class="badge badge-processed">✅ High Confidence (' + confPct + '%)</span>';
     document.getElementById('auto-alert').style.display = 'flex';
-  } else if(data.status === 'review_required') {
-    statusEl.className = 'badge badge-review'; statusEl.textContent = 'Review Required';
-    diStatus.innerHTML = '<span class="badge badge-review">Review Required</span>';
+    document.getElementById('auto-alert').textContent = '✅ High confidence — outputs auto-generated. Review and click Approve to confirm.';
+  } else if (conf >= threshold * 0.75) {
+    statusEl.className = 'badge badge-review';
+    statusEl.textContent = '⚠️ Check Outputs (' + confPct + '%)';
+    diStatus.innerHTML = '<span class="badge badge-review">⚠️ Check Outputs (' + confPct + '%)</span>';
     document.getElementById('review-alert').style.display = 'flex';
   } else {
+    statusEl.className = 'badge badge-review';
+    statusEl.textContent = '⚠️ Low Confidence (' + confPct + '%)';
+    diStatus.innerHTML = '<span class="badge badge-review">⚠️ Low Confidence (' + confPct + '%)</span>';
+    document.getElementById('review-alert').style.display = 'flex';
+  }
+  if(data.status === 'error') {
     statusEl.className = 'badge badge-error'; statusEl.textContent = data.status;
   }
 
@@ -1757,12 +1825,16 @@ function renderResult(data, file) {
   // OBS-007: Show sensitivity warning if detected
   if (data.is_sensitive) document.getElementById('di-sensitive-row').style.display = '';
 
-  // Confidence
-  const conf = data.unified_confidence || 0;
+  // Confidence — use per-type threshold from backend, not hardcoded 0.85
+  const conf      = data.unified_confidence || 0;
+  const threshold = data.confidence_threshold || 0.85;
   document.getElementById('conf-score-label').textContent = (conf*100).toFixed(0) + '%';
   const bar = document.getElementById('conf-bar');
-  bar.style.width = (conf*100) + '%';
-  bar.className = 'conf-bar ' + (conf >= 0.85 ? 'conf-high' : conf >= 0.60 ? 'conf-mid' : 'conf-low');
+  bar.style.width = Math.min(conf*100, 100) + '%';
+  bar.className = 'conf-bar ' + (conf >= threshold ? 'conf-high' : conf >= threshold * 0.75 ? 'conf-mid' : 'conf-low');
+  // Update threshold label dynamically
+  const threshEl = document.getElementById('conf-threshold-label');
+  if (threshEl) threshEl.textContent = 'Threshold: ' + (threshold*100).toFixed(0) + '% (' + (data.letter_type||'default') + ') | Textract + SNOMED + LLM weighted';
 
   // Populate structured detail fields from extraction
   const s = data.structured || {};
@@ -1774,13 +1846,30 @@ function renderResult(data, file) {
   if (s.diagnosis_text)    setVal('field-conclusion', s.diagnosis_text);
   if (s.indication || s.impression) setVal('field-conclusion', s.indication || s.impression);
 
-  // SNOMED chips
+  // SNOMED chips — Coding tab
   renderChips('chips-problems',   (data.snomed||{}).problems   || []);
   renderChips('chips-medications',(data.snomed||{}).medications|| []);
   renderChips('chips-diagnoses',  (data.snomed||{}).diagnoses  || []);
   renderRightEntities('right-problems',   (data.snomed||{}).problems   || []);
   renderRightEntities('right-medications',(data.snomed||{}).medications|| []);
   renderRightEntities('right-diagnoses',  (data.snomed||{}).diagnoses  || []);
+
+  // SNOMED chips — Details tab (visible without switching tabs)
+  const snomedProbs = (data.snomed||{}).problems   || [];
+  const snomedMeds  = (data.snomed||{}).medications|| [];
+  const snomedDx    = (data.snomed||{}).diagnoses  || [];
+  // merge problems + diagnoses so users see all clinical terms in one place
+  renderChips('detail-chips-problems',    [...snomedProbs, ...snomedDx]);
+  renderChips('detail-chips-medications', snomedMeds);
+  renderChips('detail-chips-diagnoses',   snomedDx);
+  // show SNOMED confidence badge
+  const snomedConf = data.pipeline_stages && data.pipeline_stages.track_a
+    ? data.pipeline_stages.track_a.confidence : null;
+  const snomedBadge = document.getElementById('snomed-conf-badge');
+  if (snomedBadge && snomedConf !== null) {
+    const total = snomedProbs.length + snomedMeds.length + snomedDx.length;
+    snomedBadge.textContent = total + ' entities · conf ' + (snomedConf*100).toFixed(0) + '%';
+  }
 
   // ICD chips
   const icds = data.icd_codes || [];
@@ -1955,11 +2044,15 @@ function renderChips(containerId, entities) {
   entities.forEach(e => {
     const chip = document.createElement('span');
     chip.className = 'snomed-chip';
-    chip.title = e.description || '';
+    // Show full description in tooltip, confidence score if available
+    const confPct = e.confidence ? ' (' + (e.confidence*100).toFixed(0) + '%)' : '';
+    chip.title = (e.description || e.text || '') + confPct;
     chip.textContent = e.text || '';
     const code = document.createElement('span');
     code.className = 'snomed-code';
-    code.textContent = ' ' + (e.snomed_code || '?');
+    // Show SNOMED code, or 'No map' if Comprehend returned no code
+    code.textContent = ' ' + (e.snomed_code ? e.snomed_code : 'No map');
+    code.style.color = e.snomed_code ? '' : 'var(--nhs-yellow)';
     chip.appendChild(code);
     el.appendChild(chip);
   });
@@ -1982,12 +2075,10 @@ function renderRightEntities(containerId, entities) {
     name.style.fontWeight = '600';
     name.textContent = e.text || '';
     row.appendChild(name);
-    if (e.snomed_code) {
-      const code = document.createElement('span');
-      code.style.color = 'var(--muted)';
-      code.textContent = ' \u00b7 ' + e.snomed_code;
-      row.appendChild(code);
-    }
+    const code = document.createElement('span');
+    code.style.color = e.snomed_code ? 'var(--muted)' : 'var(--nhs-yellow)';
+    code.textContent = ' \u00b7 ' + (e.snomed_code || 'No SNOMED map');
+    row.appendChild(code);
     el.appendChild(row);
   });
 }
@@ -2045,13 +2136,42 @@ function copyText(id) {
   });
 }
 
+// Convert markdown-style text from LLM into clean readable HTML.
+// Handles **bold**, *italic*, bullet lines (- / * / numbered), section headers.
+function mdToHtml(text) {
+  if (!text) return '';
+  // Escape any actual HTML first to prevent XSS
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  let html = escaped
+    // **bold** → <strong>
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    // *italic* → <em>
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    // Numbered list items: "1. text" or "1) text"
+    .replace(/^\d+[\.\)]\s+(.+)$/gm, '<li>$1</li>')
+    // Bullet list items: "- text" or "* text"
+    .replace(/^[\-\*]\s+(.+)$/gm, '<li>$1</li>')
+    // Wrap consecutive <li> blocks in <ol> / <ul>
+    .replace(/(<li>.*<\/li>\n?)+/g, m => '<ul style="margin:6px 0 6px 16px;padding:0">' + m + '</ul>')
+    // Double newline → paragraph break
+    .replace(/\n{2,}/g, '</p><p style="margin:6px 0">')
+    // Single newline → line break
+    .replace(/\n/g, '<br>');
+
+  return '<p style="margin:0">' + html + '</p>';
+}
+
 function setText(id, text) {
   const el = document.getElementById(id);
   if(!el) return;
   // preserve copy button if present
   const btn = el.querySelector('.copy-btn');
-  if(btn) { el.textContent = text; el.prepend(btn); }
-  else el.textContent = text;
+  el.innerHTML = mdToHtml(text);
+  if(btn) el.prepend(btn);
 }
 function setVal(id, val) { const el = document.getElementById(id); if(el) el.value = val; }
 
