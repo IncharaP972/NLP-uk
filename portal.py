@@ -1488,25 +1488,44 @@ body{background:var(--bg);color:var(--text);min-height:100vh}
             </div>
           </div>
 
-          <!-- SNOMED section inline on Details tab -->
-          <div class="field-group" style="margin-top:12px">
-            <div class="field-label" style="display:flex;align-items:center;justify-content:space-between">
-              <span>SNOMED CT Entities</span>
-              <span id="snomed-conf-badge" style="font-size:11px;color:var(--muted);font-weight:400"></span>
+          <!-- SNOMED CT Mapping Card — prominent, dedicated slot below Summary -->
+          <div id="snomed-card" style="margin-top:14px;border:2px solid #005eb8;border-radius:10px;overflow:hidden">
+            <!-- Card header -->
+            <div style="background:#005eb8;padding:8px 12px;display:flex;align-items:center;justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:15px">🧬</span>
+                <span style="color:#fff;font-weight:700;font-size:13px;letter-spacing:.3px">SNOMED CT Mappings</span>
+                <span style="background:rgba(255,255,255,0.2);color:#fff;font-size:11px;padding:2px 7px;border-radius:10px;font-weight:600" id="snomed-count-badge">0 entities</span>
+              </div>
+              <span id="snomed-conf-badge" style="color:rgba(255,255,255,0.85);font-size:11px;font-weight:500"></span>
             </div>
-            <div style="background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:4px">
-              <div style="margin-bottom:6px">
-                <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">🔴 Problems / Diagnoses</div>
-                <div id="detail-chips-problems" style="min-height:24px"></div>
-              </div>
-              <div style="margin-bottom:6px;border-top:1px solid var(--border);padding-top:6px">
-                <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">💊 Medications</div>
-                <div id="detail-chips-medications" style="min-height:24px"></div>
-              </div>
-              <div style="border-top:1px solid var(--border);padding-top:6px">
-                <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">🩺 Confirmed Diagnoses</div>
-                <div id="detail-chips-diagnoses" style="min-height:24px"></div>
-              </div>
+            <!-- Legend row -->
+            <div style="background:#eaf1fb;padding:5px 12px;display:flex;gap:14px;font-size:11px;color:#444;border-bottom:1px solid #c8d8ea">
+              <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#c0392b;margin-right:4px;vertical-align:middle"></span>Problem/Finding</span>
+              <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#1a6636;margin-right:4px;vertical-align:middle"></span>Diagnosis</span>
+              <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#1a4fa0;margin-right:4px;vertical-align:middle"></span>Medication</span>
+            </div>
+            <!-- Table -->
+            <div style="overflow-x:auto;max-height:320px;overflow-y:auto">
+              <table id="snomed-table" style="width:100%;border-collapse:collapse;font-size:12px">
+                <thead>
+                  <tr style="background:#f0f4fa;position:sticky;top:0;z-index:1">
+                    <th style="padding:6px 10px;text-align:left;font-weight:700;color:#333;border-bottom:1px solid #c8d8ea;width:90px">Category</th>
+                    <th style="padding:6px 10px;text-align:left;font-weight:700;color:#333;border-bottom:1px solid #c8d8ea">Clinical Term</th>
+                    <th style="padding:6px 10px;text-align:left;font-weight:700;color:#333;border-bottom:1px solid #c8d8ea;width:100px">SNOMED Code</th>
+                    <th style="padding:6px 10px;text-align:left;font-weight:700;color:#333;border-bottom:1px solid #c8d8ea">Description</th>
+                    <th style="padding:6px 10px;text-align:center;font-weight:700;color:#333;border-bottom:1px solid #c8d8ea;width:58px">Conf.</th>
+                  </tr>
+                </thead>
+                <tbody id="snomed-table-body">
+                  <tr><td colspan="5" style="padding:16px;text-align:center;color:#888;font-style:italic">Processing…</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <!-- Empty state (shown when 0 entities returned) -->
+            <div id="snomed-empty" style="display:none;padding:14px 12px;text-align:center;color:#666;font-size:12px;background:#fafbfc">
+              No SNOMED CT entities identified — document may use non-standard terminology or OCR quality was low.
+              <span style="display:block;margin-top:4px;color:#999;font-size:11px">Check the Coding tab for raw ICD codes and medication extraction.</span>
             </div>
           </div>
 
@@ -1854,21 +1873,17 @@ function renderResult(data, file) {
   renderRightEntities('right-medications',(data.snomed||{}).medications|| []);
   renderRightEntities('right-diagnoses',  (data.snomed||{}).diagnoses  || []);
 
-  // SNOMED chips — Details tab (visible without switching tabs)
+  // SNOMED CT mapping table — Details tab (prominent dedicated card)
   const snomedProbs = (data.snomed||{}).problems   || [];
   const snomedMeds  = (data.snomed||{}).medications|| [];
   const snomedDx    = (data.snomed||{}).diagnoses  || [];
-  // merge problems + diagnoses so users see all clinical terms in one place
-  renderChips('detail-chips-problems',    [...snomedProbs, ...snomedDx]);
-  renderChips('detail-chips-medications', snomedMeds);
-  renderChips('detail-chips-diagnoses',   snomedDx);
-  // show SNOMED confidence badge
+  renderSnomedTable(snomedProbs, snomedMeds, snomedDx);
+  // Header confidence badge
   const snomedConf = data.pipeline_stages && data.pipeline_stages.track_a
     ? data.pipeline_stages.track_a.confidence : null;
   const snomedBadge = document.getElementById('snomed-conf-badge');
   if (snomedBadge && snomedConf !== null) {
-    const total = snomedProbs.length + snomedMeds.length + snomedDx.length;
-    snomedBadge.textContent = total + ' entities · conf ' + (snomedConf*100).toFixed(0) + '%';
+    snomedBadge.textContent = 'AWS Comprehend · conf ' + (snomedConf*100).toFixed(0) + '%';
   }
 
   // ICD chips
@@ -2027,6 +2042,97 @@ function renderResult(data, file) {
   document.getElementById('btn-emis').onclick = () => {
     alert('Export to EMIS: In production this would push the structured JSON to the EMIS platform via the configured API endpoint.');
   };
+}
+
+// ── SNOMED CT Mapping Table ───────────────────────────────────────────────────
+// Renders a proper table in the dedicated SNOMED card on the Details tab.
+// Categories: problems (red), diagnoses (green), medications (blue).
+// Each row shows: category badge | clinical term | SNOMED code | description | confidence %.
+function renderSnomedTable(problems, medications, diagnoses) {
+  const tbody = document.getElementById('snomed-table-body');
+  const emptyMsg = document.getElementById('snomed-empty');
+  const countBadge = document.getElementById('snomed-count-badge');
+  if (!tbody) return;
+
+  // Annotate each entity with its display category
+  const rows = [
+    ...problems.map(e  => ({ ...e, _cat: 'Problem',    _color: '#c0392b', _bg: '#fdf2f2' })),
+    ...diagnoses.map(e => ({ ...e, _cat: 'Diagnosis',  _color: '#1a6636', _bg: '#f2faf5' })),
+    ...medications.map(e=>({ ...e, _cat: 'Medication', _color: '#1a4fa0', _bg: '#f2f5fc' })),
+  ];
+
+  // Update count badge
+  if (countBadge) countBadge.textContent = rows.length + (rows.length === 1 ? ' entity' : ' entities');
+
+  tbody.textContent = '';  // safe clear
+
+  if (!rows.length) {
+    if (emptyMsg) emptyMsg.style.display = '';
+    tbody.style.display = 'none';
+    return;
+  }
+  if (emptyMsg) emptyMsg.style.display = 'none';
+  tbody.style.display = '';
+
+  rows.forEach((e, idx) => {
+    const tr = document.createElement('tr');
+    tr.style.cssText = 'border-bottom:1px solid #edf1f7;' + (idx % 2 === 0 ? 'background:#fff' : 'background:#fafbfc');
+
+    // Category badge cell
+    const tdCat = document.createElement('td');
+    tdCat.style.cssText = 'padding:7px 10px;vertical-align:middle';
+    const badge = document.createElement('span');
+    badge.style.cssText = `display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;color:${e._color};background:${e._bg};border:1px solid ${e._color}30;white-space:nowrap`;
+    badge.textContent = e._cat;
+    tdCat.appendChild(badge);
+
+    // Clinical term cell
+    const tdTerm = document.createElement('td');
+    tdTerm.style.cssText = 'padding:7px 10px;font-weight:600;color:#222;vertical-align:middle';
+    tdTerm.textContent = e.text || '—';
+
+    // SNOMED code cell
+    const tdCode = document.createElement('td');
+    tdCode.style.cssText = 'padding:7px 10px;vertical-align:middle';
+    if (e.snomed_code) {
+      const codeEl = document.createElement('code');
+      codeEl.style.cssText = 'background:#e8f0fe;color:#1a4fa0;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:.3px;font-family:monospace';
+      codeEl.textContent = e.snomed_code;
+      tdCode.appendChild(codeEl);
+    } else {
+      const noMap = document.createElement('span');
+      noMap.style.cssText = 'color:#999;font-size:11px;font-style:italic';
+      noMap.textContent = 'No map';
+      tdCode.appendChild(noMap);
+    }
+
+    // Description cell
+    const tdDesc = document.createElement('td');
+    tdDesc.style.cssText = 'padding:7px 10px;color:#555;font-size:11px;vertical-align:middle';
+    tdDesc.textContent = e.description || (e.snomed_code ? 'SNOMED CT concept' : 'Not mapped by Comprehend Medical');
+
+    // Confidence cell
+    const tdConf = document.createElement('td');
+    tdConf.style.cssText = 'padding:7px 10px;text-align:center;vertical-align:middle';
+    if (e.confidence) {
+      const pct = Math.round(e.confidence * 100);
+      const confSpan = document.createElement('span');
+      const confColor = pct >= 70 ? '#1a6636' : pct >= 45 ? '#d67e00' : '#c0392b';
+      confSpan.style.cssText = `font-size:11px;font-weight:700;color:${confColor}`;
+      confSpan.textContent = pct + '%';
+      tdConf.appendChild(confSpan);
+    } else {
+      tdConf.textContent = '—';
+      tdConf.style.color = '#aaa';
+    }
+
+    tr.appendChild(tdCat);
+    tr.appendChild(tdTerm);
+    tr.appendChild(tdCode);
+    tr.appendChild(tdDesc);
+    tr.appendChild(tdConf);
+    tbody.appendChild(tr);
+  });
 }
 
 // FIX (review comment 7): Use safe DOM construction (textContent) instead of
