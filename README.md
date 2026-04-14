@@ -45,8 +45,7 @@ into structured outputs aligned with medical standards.
  
  ## Team & Collaboration
  
- This project is built by Nischitha P from 4th Year RVCE and collaborated by Mayank Bajaj, Anika U Bhat, 
-and Sriram Velumuri as part of a departmental project in collaboration with East Hampstead London Clinic.
+ This project is built by **Nischitha P** from 4th Year RVCE and collaborated by Mayank Bajaj, Anika U Bhat,Sriram Velumuri,Shreya M,Kushagra Aatre, Aryan Sinha as part of a departmental project in collaboration with East Hampstead London Clinic.
  
  ## Tech Stack
  
