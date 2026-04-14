@@ -229,7 +229,7 @@ def run_comprehend_medical(text: str) -> dict:
         else:
             problems.append(entry)
 
-    snomed_conf = (sum(e["confidence"] for e in entities) / len(entities)) if entities else 0.3
+    snomed_conf = (sum(e.get("Score", 0) for e in entities) / len(entities)) if entities else 0.3
     return {
         "entities": entities,
         "problems": problems,
@@ -1119,6 +1119,37 @@ def run_full_pipeline(doc_id: str, upload_path: Path) -> dict:
 
     result["pages_processed"] = len(image_paths)
 
+    # ── Scrollable preview: original page images (BEFORE OpenCV preprocessing) ─
+    # Always use PyMuPDF directly for preview so:
+    #   (a) all pages are captured (document_handler sometimes returns only 1)
+    #   (b) the user sees the ORIGINAL scan, not the brightened/thresholded version
+    orig_preview_paths = []
+    try:
+        import fitz as _fitz
+        _ext = upload_path.suffix.lower()
+        if _ext == ".pdf":
+            _doc = _fitz.open(str(upload_path))
+            _mat = _fitz.Matrix(1.5, 1.5)   # 1.5× zoom — good balance of quality vs size
+            for _i, _pg in enumerate(_doc):
+                _pix  = _pg.get_pixmap(matrix=_mat)
+                _dest = work_dir / f"orig_{_i+1:02d}.png"
+                _pix.save(str(_dest))
+                orig_preview_paths.append(_dest)
+        else:
+            # Images (JPEG/PNG/TIFF) — copy original directly for preview
+            _dest = work_dir / f"orig_01{upload_path.suffix}"
+            if not _dest.exists():
+                shutil.copy(str(upload_path), str(_dest))
+            orig_preview_paths.append(_dest)
+    except Exception:
+        # Fallback: use whatever the pipeline already generated
+        orig_preview_paths = [p for p in image_paths if p.exists()]
+
+    result["preview_pages"] = [
+        f"/pages/{doc_id}/{p.name}" for p in orig_preview_paths if p.exists()
+    ]
+    result["preview_image"] = result["preview_pages"][0] if result["preview_pages"] else None
+
     # ── Tier 1: Textract per page, concatenate ────────────────────────────────
     all_text    = []
     all_confs   = []
@@ -1317,8 +1348,8 @@ body{background:var(--bg);color:var(--text);min-height:100vh}
 .doc-viewer{flex:1.2;background:#fff;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
 .doc-viewer-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
 .doc-viewer-header h3{font-size:14px;color:var(--nhs-dark);font-weight:600}
-.doc-img{flex:1;overflow:auto;padding:16px;background:#f5f5f5;display:flex;justify-content:center}
-.doc-img img{max-width:100%;border-radius:4px;box-shadow:0 2px 12px rgba(0,0,0,.15)}
+.doc-img{flex:1;overflow-y:auto;padding:0;background:#f0f0f0;display:flex;flex-direction:column;align-items:center}
+#doc-pages-inner{width:100%;padding:14px;box-sizing:border-box}
 
 /* Center: details */
 .details-panel{width:380px;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
@@ -1497,8 +1528,11 @@ body{background:var(--bg);color:var(--text);min-height:100vh}
         <h3 id="doc-filename">Document</h3>
         <span id="doc-status-badge" class="badge badge-processed" style="margin-left:auto">Processed</span>
       </div>
-      <div class="doc-img">
-        <img id="doc-preview" src="" alt="Document preview">
+      <div class="doc-img" id="doc-pages-container" style="flex-direction:column;align-items:center;gap:10px;padding:16px;overflow-y:auto">
+        <!-- Pages rendered here by JS as scrollable strip -->
+        <div id="doc-pages-inner" style="display:flex;flex-direction:column;gap:10px;width:100%;align-items:center">
+          <span style="color:#aaa;font-size:13px">Upload a document to preview</span>
+        </div>
       </div>
     </div>
 
@@ -1811,10 +1845,41 @@ function renderResult(data, file) {
     document.getElementById(id).className = 'step done';
   });
 
-  // Document image preview
-  const reader = new FileReader();
-  reader.onload = e => { document.getElementById('doc-preview').src = e.target.result; };
-  reader.readAsDataURL(file);
+  // Scrollable document preview — render all pages as stacked images
+  const pagesInner = document.getElementById('doc-pages-inner');
+  pagesInner.innerHTML = '';
+  const pages = data.preview_pages || (data.preview_image ? [data.preview_image] : []);
+  if (pages.length) {
+    pages.forEach((url, i) => {
+      // Page label
+      const label = document.createElement('div');
+      label.style.cssText = 'font-size:10px;color:#999;text-align:center;width:100%;margin-bottom:-6px';
+      label.textContent = 'Page ' + (i + 1) + ' of ' + pages.length;
+      pagesInner.appendChild(label);
+      // Page image
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = 'Page ' + (i + 1);
+      img.style.cssText = 'width:100%;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.18);background:#fff';
+      img.onerror = () => { img.style.display = 'none'; };
+      pagesInner.appendChild(img);
+    });
+  } else {
+    // Fallback: use FileReader for direct image uploads (JPEG/PNG)
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (['jpg','jpeg','png'].includes(ext)) {
+      const reader = new FileReader();
+      reader.onload = e => {
+        const img = document.createElement('img');
+        img.src = e.target.result;
+        img.style.cssText = 'width:100%;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.18)';
+        pagesInner.appendChild(img);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      pagesInner.innerHTML = '<span style="color:#aaa;font-size:13px">Preview not available</span>';
+    }
+  }
 
   document.getElementById('doc-filename').textContent = data.filename || file.name;
 
@@ -2395,6 +2460,13 @@ function resetUpload() {
 </body>
 </html>
 """
+
+@app.route("/pages/<doc_id>/<filename>")
+def serve_page_image(doc_id, filename):
+    """Serve individual page images for the scrollable document preview."""
+    page_dir = UPLOAD_DIR / doc_id
+    return send_from_directory(str(page_dir), filename)
+
 
 @app.route("/health")
 def health():
