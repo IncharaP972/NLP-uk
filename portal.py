@@ -197,8 +197,74 @@ def run_textract(image_path: Path) -> dict:
     return {"text": "\n".join(lines), "confidence": avg_conf, "blocks": blocks}
 
 
+def _snomed_term_fallback(text: str, client) -> list:
+    """SRS §3.2 semantic fallback: when InferSNOMEDCT returns 0 entities on the full
+    document text, use detect_entities_v2 to extract individual medical terms, then
+    call infer_snomedct on each term in isolation for a targeted SNOMED lookup.
+    Returns the top-3 highest-confidence matches.
+    """
+    # Step 1 — broad medical entity detection
+    try:
+        resp = client.detect_entities_v2(Text=text[:10000])
+        raw = resp.get("Entities", [])
+    except Exception:
+        raw = []
+
+    CLINICAL_TYPES = {
+        "DX_NAME", "MEDICAL_CONDITION", "PROCEDURE", "TEST_NAME",
+        "GENERIC_NAME", "BRAND_NAME", "MEDICATION", "TREATMENT_NAME",
+        "SYSTEM_ORGAN_SITE", "SIGN", "SYMPTOM",
+    }
+    candidates = sorted(
+        [e for e in raw if e.get("Type") in CLINICAL_TYPES and e.get("Score", 0) > 0.40],
+        key=lambda x: x.get("Score", 0), reverse=True
+    )[:10]  # try top-10, keep best 3
+
+    # Step 2 — per-term SNOMED lookup
+    results, seen_codes = [], set()
+    for entity in candidates:
+        term = entity.get("Text", "").strip()
+        if not term or len(term) < 3:
+            continue
+        try:
+            sr = client.infer_snomedct(Text=term)
+            sr_entities = sr.get("Entities", [])
+            if not sr_entities:
+                continue
+            se = sr_entities[0]
+            concepts = se.get("SNOMEDCTConcepts", [])
+            if not concepts:
+                continue
+            code = concepts[0].get("Code", "")
+            if not code or code in seen_codes:
+                continue
+            seen_codes.add(code)
+            # Combined confidence: entity detection × SNOMED concept match
+            conf = round(entity.get("Score", 0) * se.get("Score", 0.5), 3)
+            cat  = entity.get("Category", "MEDICAL_CONDITION").upper()
+            results.append({
+                "text":        term,
+                "category":    entity.get("Category", "MEDICAL_CONDITION"),
+                "snomed_code": code,
+                "description": concepts[0].get("Description", ""),
+                "confidence":  conf,
+                "entity_id":   str(uuid.uuid4())[:8],
+                "source":      "term_extraction",
+            })
+        except Exception:
+            continue
+
+    results.sort(key=lambda x: x["confidence"], reverse=True)
+    return results[:3]
+
+
 def run_comprehend_medical(text: str) -> dict:
-    """Run SNOMED mapping via Comprehend Medical."""
+    """Run SNOMED mapping via Comprehend Medical.
+
+    Primary path  : InferSNOMEDCT on full document text.
+    Fallback path : detect_entities_v2 → per-term InferSNOMEDCT → top-3 results.
+    (SRS §3.2 — semantic SNOMED fallback when primary returns 0 entities.)
+    """
     client = make_client("comprehendmedical")
     try:
         resp = client.infer_snomedct(Text=text[:10000])
@@ -211,12 +277,13 @@ def run_comprehend_medical(text: str) -> dict:
         concepts = e.get("SNOMEDCTConcepts", [])
         top = concepts[0] if concepts else {}
         entry = {
-            "text": e.get("Text", ""),
-            "category": e.get("Category", ""),
+            "text":        e.get("Text", ""),
+            "category":    e.get("Category", ""),
             "snomed_code": top.get("Code", ""),
             "description": top.get("Description", ""),
-            "confidence": e.get("Score", 0),
-            "entity_id": str(uuid.uuid4())[:8],
+            "confidence":  e.get("Score", 0),
+            "entity_id":   str(uuid.uuid4())[:8],
+            "source":      "comprehend_medical",
         }
         cat = e.get("Category", "").upper()
         if "MEDICATION" in cat or "DRUG" in cat:
@@ -229,13 +296,37 @@ def run_comprehend_medical(text: str) -> dict:
         else:
             problems.append(entry)
 
-    snomed_conf = (sum(e.get("Score", 0) for e in entities) / len(entities)) if entities else 0.3
+    # ── Fallback: term-by-term extraction when full-doc InferSNOMEDCT finds nothing ──
+    used_fallback = False
+    top3_fallback: list = []
+    if not entities:
+        top3_fallback = _snomed_term_fallback(text, client)
+        used_fallback = bool(top3_fallback)
+        for entry in top3_fallback:
+            cat = entry.get("category", "").upper()
+            if "MEDICATION" in cat or "DRUG" in cat or "GENERIC" in cat or "BRAND" in cat:
+                medications.append(entry)
+            elif "DIAGNOSIS" in cat or "CONDITION" in cat:
+                diagnoses.append(entry)
+            else:
+                problems.append(entry)
+
+    # Confidence: avg entity score (primary) OR avg fallback score OR default
+    if entities:
+        snomed_conf = sum(e.get("Score", 0) for e in entities) / len(entities)
+    elif top3_fallback:
+        snomed_conf = sum(e["confidence"] for e in top3_fallback) / len(top3_fallback)
+    else:
+        snomed_conf = 0.3
+
     return {
-        "entities": entities,
-        "problems": problems,
-        "medications": medications,
-        "diagnoses": diagnoses,
-        "snomed_confidence": snomed_conf,
+        "entities":         entities,
+        "problems":         problems,
+        "medications":      medications,
+        "diagnoses":        diagnoses,
+        "snomed_confidence": round(snomed_conf, 3),
+        "used_fallback":    used_fallback,
+        "top3_fallback":    top3_fallback,
     }
 
 
@@ -1276,10 +1367,12 @@ def run_full_pipeline(doc_id: str, upload_path: Path) -> dict:
     result["icd_codes"]         = icd_codes
     result["medications_raw"]   = medications
     result["snomed"]            = {
-        "problems":     snomed["problems"],
-        "medications":  snomed["medications"],
-        "diagnoses":    snomed["diagnoses"],
-        "all_entities": snomed["entities"][:20],
+        "problems":      snomed["problems"],
+        "medications":   snomed["medications"],
+        "diagnoses":     snomed["diagnoses"],
+        "all_entities":  snomed["entities"][:20],
+        "used_fallback": snomed.get("used_fallback", False),
+        "top3_fallback": snomed.get("top3_fallback", []),
     }
     result["summaries"]          = summaries
     result["gp_actions"]         = struct_fields.get("gp_actions") or summaries.get("gp_actions", "")
@@ -1977,15 +2070,17 @@ function renderResult(data, file) {
   renderRightEntities('right-diagnoses',  (data.snomed||{}).diagnoses  || []);
 
   // SNOMED CT mapping table — Details tab (prominent dedicated card)
-  const snomedProbs = (data.snomed||{}).problems   || [];
-  const snomedMeds  = (data.snomed||{}).medications|| [];
-  const snomedDx    = (data.snomed||{}).diagnoses  || [];
-  const trackA      = (data.pipeline_stages||{}).track_a || {};
-  const trackAError = trackA.error || null;
+  const snomedProbs  = (data.snomed||{}).problems    || [];
+  const snomedMeds   = (data.snomed||{}).medications || [];
+  const snomedDx     = (data.snomed||{}).diagnoses   || [];
+  const usedFallback = (data.snomed||{}).used_fallback || false;
+  const top3Fallback = (data.snomed||{}).top3_fallback || [];
+  const trackA       = (data.pipeline_stages||{}).track_a || {};
+  const trackAError  = trackA.error || null;
   // Fallbacks: locally extracted ICD codes and raw medications (always available, no AWS needed)
-  const icdFallback  = data.icd_codes        || [];
-  const medsFallback = data.medications_raw  || [];
-  renderSnomedTable(snomedProbs, snomedMeds, snomedDx, icdFallback, medsFallback, trackAError);
+  const icdFallback  = data.icd_codes       || [];
+  const medsFallback = data.medications_raw || [];
+  renderSnomedTable(snomedProbs, snomedMeds, snomedDx, icdFallback, medsFallback, trackAError, usedFallback, top3Fallback);
   // Header confidence badge
   const snomedConf = trackA.confidence != null ? trackA.confidence : null;
   const snomedBadge = document.getElementById('snomed-conf-badge');
@@ -2173,51 +2268,72 @@ function renderResult(data, file) {
 //  1. AWS Comprehend Medical SNOMED entities (preferred — problems/diagnoses/medications with codes)
 //  2. If Comprehend failed/empty: falls back to locally-extracted ICD codes + raw medications
 // Each row: category badge | clinical term | code | description | confidence
-function renderSnomedTable(problems, medications, diagnoses, icdFallback, medsFallback, comprehendError) {
+function renderSnomedTable(problems, medications, diagnoses, icdFallback, medsFallback, comprehendError, usedTermFallback, top3Fallback) {
   const tbody      = document.getElementById('snomed-table-body');
   const emptyMsg   = document.getElementById('snomed-empty');
   const countBadge = document.getElementById('snomed-count-badge');
   const cardHeader = document.querySelector('#snomed-card > div:first-child');
   if (!tbody) return;
 
-  // Build rows from AWS Comprehend entities
+  // Remove any old banner so it doesn't stack on re-uploads
+  const oldNote = document.getElementById('snomed-fallback-note');
+  if (oldNote) oldNote.remove();
+
+  // Build rows from AWS Comprehend primary entities
   let rows = [
-    ...problems.map(e   => ({ text: e.text, code: e.snomed_code, desc: e.description, conf: e.confidence, _cat: 'Problem',    _color: '#c0392b', _bg: '#fdf2f2', _source: 'SNOMED CT' })),
-    ...diagnoses.map(e  => ({ text: e.text, code: e.snomed_code, desc: e.description, conf: e.confidence, _cat: 'Diagnosis',  _color: '#1a6636', _bg: '#f2faf5', _source: 'SNOMED CT' })),
-    ...medications.map(e=> ({ text: e.text, code: e.snomed_code, desc: e.description, conf: e.confidence, _cat: 'Medication', _color: '#1a4fa0', _bg: '#f2f5fc', _source: 'SNOMED CT' })),
+    ...problems.map(e   => ({ text: e.text, code: e.snomed_code, desc: e.description, conf: e.confidence, _cat: 'Problem',    _color: '#c0392b', _bg: '#fdf2f2', _source: e.source || 'SNOMED CT' })),
+    ...diagnoses.map(e  => ({ text: e.text, code: e.snomed_code, desc: e.description, conf: e.confidence, _cat: 'Diagnosis',  _color: '#1a6636', _bg: '#f2faf5', _source: e.source || 'SNOMED CT' })),
+    ...medications.map(e=> ({ text: e.text, code: e.snomed_code, desc: e.description, conf: e.confidence, _cat: 'Medication', _color: '#1a4fa0', _bg: '#f2f5fc', _source: e.source || 'SNOMED CT' })),
   ];
 
-  // ── Fallback: local extraction when Comprehend returned nothing ─────────────
-  const usingFallback = rows.length === 0;
-  if (usingFallback) {
-    // ICD codes — locally extracted by regex, always available
+  // ── Term-extraction fallback: top-3 nearest SNOMED matches (SRS §3.2) ───────
+  // Shown when InferSNOMEDCT returned 0 entities on the full doc — we extracted
+  // individual clinical terms via detect_entities_v2 and mapped each to SNOMED.
+  if (usedTermFallback && top3Fallback && top3Fallback.length > 0) {
+    // Banner
+    if (cardHeader) {
+      const n = document.createElement('div');
+      n.id = 'snomed-fallback-note';
+      n.style.cssText = 'background:#1a4fa0;color:#fff;font-size:11px;padding:5px 14px;text-align:center;font-weight:600;letter-spacing:.2px';
+      n.textContent = '🔍 Top 3 nearest SNOMED CT matches — extracted via term-level analysis (SRS §3.2)';
+      cardHeader.parentElement.insertBefore(n, cardHeader.nextSibling);
+    }
+    // The rows are already in problems/medications/diagnoses arrays (populated by Python)
+    // but flag them visually as "Term Extraction"
+    rows = rows.map(r => ({ ...r, _source: 'Term Extraction' }));
+
+  } else if (rows.length === 0) {
+    // ── Deepest fallback: local ICD + medications when both Comprehend paths fail ──
     (icdFallback || []).forEach(code => {
       rows.push({ text: code, code: code, desc: 'ICD-10 code (locally extracted)', conf: null,
                   _cat: 'ICD Code', _color: '#6a4e9e', _bg: '#f5f0fc', _source: 'Local' });
     });
-    // Raw medications — locally extracted by dosage-pattern regex
     (medsFallback || []).forEach(m => {
       rows.push({ text: m.name, code: null, desc: m.dose || 'medication', conf: null,
                   _cat: 'Medication', _color: '#1a4fa0', _bg: '#f2f5fc', _source: 'Local' });
     });
-    // Update header to signal fallback mode
     if (cardHeader && comprehendError) {
-      const note = cardHeader.querySelector('#snomed-fallback-note');
-      if (!note) {
-        const n = document.createElement('div');
-        n.id = 'snomed-fallback-note';
-        n.style.cssText = 'background:#d67e00;color:#fff;font-size:10px;padding:3px 12px;text-align:center';
-        n.textContent = '⚠ AWS Comprehend unavailable — showing locally extracted codes. Error: ' + comprehendError;
-        cardHeader.parentElement.insertBefore(n, cardHeader.nextSibling);
-      }
+      const n = document.createElement('div');
+      n.id = 'snomed-fallback-note';
+      n.style.cssText = 'background:#d67e00;color:#fff;font-size:10px;padding:3px 12px;text-align:center';
+      n.textContent = '⚠ AWS Comprehend unavailable — showing locally extracted codes. Error: ' + comprehendError;
+      cardHeader.parentElement.insertBefore(n, cardHeader.nextSibling);
     }
   }
 
+  const usingFallback = rows.length > 0 && rows.every(r => r._source !== 'SNOMED CT' && r._source !== 'comprehend_medical');
+
   // Count badge
   if (countBadge) {
-    const label = usingFallback ? ' local codes' : (rows.length === 1 ? ' entity' : ' entities');
-    countBadge.textContent = rows.length + label;
-    if (usingFallback) countBadge.style.background = 'rgba(214,126,0,0.6)';
+    if (usedTermFallback && top3Fallback && top3Fallback.length > 0) {
+      countBadge.textContent = 'Top 3 matches';
+      countBadge.style.background = '#1a4fa0';
+    } else if (usingFallback) {
+      countBadge.textContent = rows.length + ' local codes';
+      countBadge.style.background = 'rgba(214,126,0,0.6)';
+    } else {
+      countBadge.textContent = rows.length + (rows.length === 1 ? ' entity' : ' entities');
+    }
   }
 
   tbody.textContent = '';  // safe clear
@@ -2241,11 +2357,12 @@ function renderSnomedTable(problems, medications, diagnoses, icdFallback, medsFa
     badge.style.cssText = `display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;color:${e._color};background:${e._bg};border:1px solid ${e._color}30`;
     badge.textContent = e._cat;
     tdCat.appendChild(badge);
-    // Small source label
-    if (usingFallback) {
+    // Small source label — always show for non-primary sources
+    if (e._source && e._source !== 'SNOMED CT' && e._source !== 'comprehend_medical') {
       const src = document.createElement('div');
-      src.style.cssText = 'font-size:9px;color:#aaa;margin-top:1px';
-      src.textContent = e._source;
+      const isTermEx = e._source === 'Term Extraction' || e._source === 'term_extraction';
+      src.style.cssText = 'font-size:9px;margin-top:1px;font-weight:600;color:' + (isTermEx ? '#1a4fa0' : '#aaa');
+      src.textContent = isTermEx ? '🔍 Term Extraction' : e._source;
       tdCat.appendChild(src);
     }
 
