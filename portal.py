@@ -462,7 +462,7 @@ def run_comprehend_medical(text: str) -> dict:
 def run_bedrock_summarization(text: str, snomed_data: dict, letter_type: str = "") -> dict:
     """Generate role-based summaries via Claude on Bedrock, tailored per document type."""
     client = make_client("bedrock-runtime")
-    MODEL  = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+    MODEL  = "anthropic.claude-3-haiku-20240307-v1:0"
 
     problems  = [e["text"] for e in snomed_data.get("problems", [])]
     meds      = [e["text"] for e in snomed_data.get("medications", [])]
@@ -490,12 +490,24 @@ Extracted clinical entities:
         # Explicit no-markdown system instruction prepended to every prompt.
         # Claude on Bedrock respects this reliably when placed at the start.
         system_instruction = (
-            "You are a clinical documentation assistant. "
+            "You are a clinical documentation assistant writing NHS-style discharge/letter summaries. "
             "STRICT RULE: Output plain text only. "
             "Do NOT use any markdown formatting whatsoever: "
             "no # headers, no ** bold, no * italic, no bullet dashes (-), "
             "no numbered lists with dots, no horizontal rules (---). "
-            "Use plain sentences separated by line breaks only."
+            "Use plain sentences separated by line breaks only. "
+            "BE CONCISE: 2-4 short sentences maximum (under 70 words). "
+            "MUST PRESERVE every clinically meaningful specific: "
+            "all dates in dd/mm/yyyy format (admission, procedure, discharge, follow-up), "
+            "all numerical values with units (e.g. blood loss 700 mL, Hb 102 g/L, BP 140/90), "
+            "all medication names with dose and frequency (e.g. ferrous sulphate 200 mg OD), "
+            "all diagnoses/findings (benign/malignant, pathology result), "
+            "and all follow-up instructions (who to contact, when, repeat tests and timeframe). "
+            "Do NOT invent values - only use numbers, dates, doses and findings that appear in the source text. "
+            "Style: terse clinical shorthand like a GP handover note, not prose. "
+            "Example style: 'Normal postnatal discharge. Vaginal delivery 14/04/2026, blood loss 700 mL, postnatal Hb 102 g/L. "
+            "Gestational diabetes present. Started ferrous sulphate 200 mg OD. Discharged home 14/04/2026. "
+            "Repeat Hb in 6-8 weeks. Follow-up: community midwife and GP.'"
         )
         clean_prompt = system_instruction + "\n\n" + prompt
         body = json.dumps({
@@ -558,23 +570,21 @@ Extracted clinical entities:
                        "cardiac diagnosis, current symptoms on/off medication, medication changes, "
                        "planned investigations or procedures (e.g. ablation, EP MDT), and follow-up plan.")
     elif "Early Pregnancy" in letter_type or "Gynaecology" in letter_type:
-        clin_prompt = (f"{context}\n\nThis is an early pregnancy / gynaecology outpatient letter. Summarise: "
-                       "presenting complaint, scan findings (gestational sac, yolk sac, fetal pole), "
-                       "gestational age estimate, diagnosis, and next steps (e.g. repeat EPAU scan).")
+        clin_prompt = (f"{context}\n\nWrite a CONCISE clinical summary (2-3 sentences ONLY). "
+                       "Include: presenting complaint, scan findings, diagnosis, next steps. Be brief.")
     elif "Antenatal Discharge" in letter_type:
-        clin_prompt = (f"{context}\n\nThis is an antenatal discharge summary. Summarise: reason for admission, "
-                       "EDD and gestational age, G/P status, key clinical findings, any complications, "
-                       "and community midwife follow-up instructions.")
+        clin_prompt = (f"{context}\n\nWrite a CONCISE clinical summary (2-3 sentences ONLY). "
+                       "Include: admission reason, gestational age, key findings, discharge plan. Be brief.")
     elif "Pre-admission" in letter_type:
         clin_prompt = (f"{context}\n\nThis is a pre-admission/surgical booking letter. Summarise: "
                        "scheduled procedure, date, speciality, clinician, and key pre-operative instructions "
                        "for the patient (fasting, medication, transport).")
     elif "Discharge" in letter_type:
-        clin_prompt = (f"{context}\n\nThis is a discharge summary. Summarise: admission reason, diagnosis, "
-                       "procedures performed, discharge condition, and follow-up required.")
+        clin_prompt = (f"{context}\n\nWrite a CONCISE clinical summary (2-3 sentences ONLY). "
+                       "Include: admission reason, diagnosis, procedures performed, discharge condition. Be brief.")
     else:
-        clin_prompt = (f"{context}\n\nWrite a concise clinical summary (3-5 sentences) for the treating clinician. "
-                       "Include key findings, diagnosis, treatment plan, and follow-up. Be precise and medical.")
+        clin_prompt = (f"{context}\n\nWrite a CONCISE clinical summary (2-3 sentences ONLY, maximum 50 words). "
+                       "Include: main diagnosis/condition, key finding or intervention, current status. NO detailed explanations.")
 
     clinician_summary = call_claude(clin_prompt)
 
