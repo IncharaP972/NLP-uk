@@ -1912,16 +1912,16 @@ body{background:var(--bg);color:var(--text);min-height:100vh}
             </div>
             <select class="field-input" id="field-letter-type" style="cursor:pointer;background:#fff">
               <option value="">Select letter type…</option>
-              <option value="Hospital Discharge Summary (after admission into hospital)">Hospital Discharge Summary (after admission into hospital)</option>
-              <option value="Clinical Letters/Report (after visiting specialists)">Clinical Letters/Report (after visiting specialists)</option>
-              <option value="111 Report (seeking advise from Clinician over phone)">111 Report (seeking advise from Clinician over phone)</option>
-              <option value="Accident &amp; Emergency Department report">Accident &amp; Emergency Department report</option>
-              <option value="Ambulance Report (When emergency services are called)">Ambulance Report (When emergency services are called)</option>
-              <option value="Private Specialists clinical letter">Private Specialists clinical letter</option>
-              <option value="External service providers (Boots, Spec savers – for Eye &amp; ENT)">External service providers (Boots, Spec savers – for Eye &amp; ENT)</option>
-              <option value="Diabetic eye screening reports">Diabetic eye screening reports</option>
-              <option value="Out of hours (East Berkshire Primary Care)">Out of hours (East Berkshire Primary Care)</option>
-              <option value="Miscellaneous">Miscellaneous</option>
+              <option data-bucket-key="HOSP" value="Hospital Discharge Summary (after admission into hospital)">Hospital Discharge Summary (after admission into hospital)</option>
+              <option data-bucket-key="CLIN" value="Clinical Letters/Report (after visiting specialists)">Clinical Letters/Report (after visiting specialists)</option>
+              <option data-bucket-key="111"  value="111 Report (seeking advice from Clinician over phone)">111 Report (seeking advice from Clinician over phone)</option>
+              <option data-bucket-key="ED"   value="Accident &amp; Emergency Department report">Accident &amp; Emergency Department report</option>
+              <option data-bucket-key="AMB"  value="Ambulance Report (When emergency services are called)">Ambulance Report (When emergency services are called)</option>
+              <option data-bucket-key="PRIV" value="Private Specialists clinical letter">Private Specialists clinical letter</option>
+              <option data-bucket-key="EXT"  value="External service providers (Boots, Spec savers – for Eye &amp; ENT)">External service providers (Boots, Spec savers – for Eye &amp; ENT)</option>
+              <option data-bucket-key="DES"  value="Diabetic eye screening reports">Diabetic eye screening reports</option>
+              <option data-bucket-key="OOH"  value="Out of hours (East Berkshire Primary Care)">Out of hours (East Berkshire Primary Care)</option>
+              <option data-bucket-key="MISC" value="Miscellaneous">Miscellaneous</option>
             </select>
             <div style="font-size:10px;color:var(--muted);margin-top:4px">Dropdown is a fallback override if the prediction is wrong.</div>
           </div>
@@ -2357,7 +2357,10 @@ function renderResult(data, file) {
   const s = data.structured || {};
   if (s.consultant)        setVal('field-consultant', s.consultant);
   if (s.department)        setVal('field-dept', s.department);
-  if (s.admission_date)    { setVal('field-event-date', s.admission_date); window._docEventDate = s.admission_date; }
+  // Always reset the per-document event date so a previous document's value
+  // never leaks into the active-problem "Started on" field.
+  window._docEventDate = s.admission_date || '';
+  if (s.admission_date) setVal('field-event-date', s.admission_date);
   if (s.discharge_date || s.appointment_date) setVal('field-letter-date', s.discharge_date || s.appointment_date);
   if (s.admission_method)  setVal('field-sender', s.admission_method);
   if (s.diagnosis_text)    setVal('field-conclusion', s.diagnosis_text);
@@ -3066,8 +3069,13 @@ function applyPredictedLetterType(rawLetterType, bucketLabel) {
   const resetLink  = document.getElementById('letter-type-reset');
   if (rawEl)    rawEl.textContent    = rawLetterType || '—';
   if (bucketEl) bucketEl.textContent = bucketLabel   || '—';
-  if (autoLine) autoLine.style.display = rawLetterType ? '' : 'none';
-  if (predBadge) predBadge.style.display = rawLetterType ? '' : 'none';
+  // Drive auto-detected indicators off the actual predicted bucket (not the
+  // raw letter type). Otherwise the dropdown can be silently auto-set to a
+  // bucket while the "Auto-detected" badge and explainer line are hidden
+  // because rawLetterType happened to be empty.
+  const hasPrediction = !!_predictedBucket;
+  if (autoLine) autoLine.style.display = hasPrediction ? '' : 'none';
+  if (predBadge) predBadge.style.display = hasPrediction ? '' : 'none';
   if (overBadge) overBadge.style.display = 'none';
   if (resetLink) resetLink.style.display = 'none';
   setVal('field-letter-type', bucketLabel);
@@ -3081,50 +3089,66 @@ function onLetterTypeChanged() {
   const overBadge = document.getElementById('letter-type-override-badge');
   const resetLink = document.getElementById('letter-type-reset');
   const overridden = current !== _predictedBucket;
-  if (predBadge) predBadge.style.display = overridden ? 'none' : (_predictedRaw ? '' : 'none');
+  // Pred badge visibility is tied to the predicted bucket, not the raw
+  // pipeline letter_type (which may be empty even when a bucket was predicted).
+  if (predBadge) predBadge.style.display = overridden ? 'none' : (_predictedBucket ? '' : 'none');
   if (overBadge) overBadge.style.display = overridden ? '' : 'none';
   if (resetLink) resetLink.style.display = overridden ? '' : 'none';
-  // Keep right-panel Document info in sync with whatever the user chose
+  // Keep right-panel Document info in sync with whatever the user chose.
+  // Fall back to the predicted BUCKET (matching the format initially shown)
+  // rather than the raw pipeline letter_type, so di-type doesn't flip formats
+  // when the user clears their selection.
   const diType = document.getElementById('di-type');
-  if (diType) diType.textContent = current || _predictedRaw || '—';
+  if (diType) diType.textContent = current || _predictedBucket || '—';
+}
+
+// Single source of truth for the 10 practice-facing bucket labels: read them
+// straight from the <select>'s data-bucket-key options. This avoids drift
+// between the dropdown options and the mapper constants — fixing the label
+// text in one place (e.g. "advise" -> "advice") automatically updates both.
+let _bucketLabelCache = null;
+function getLetterTypeBuckets() {
+  if (_bucketLabelCache) return _bucketLabelCache;
+  const sel = document.getElementById('field-letter-type');
+  const out = {};
+  if (sel) {
+    Array.from(sel.options).forEach(o => {
+      const k = o.getAttribute('data-bucket-key');
+      if (k) out[k] = o.value;
+    });
+  }
+  // Only cache once the select has been populated with its bucket options.
+  if (Object.keys(out).length) _bucketLabelCache = out;
+  return out;
 }
 
 // Map pipeline `letter_type` (and document text) to one of the 10 practice buckets.
 // Purely UI-side — does not alter backend output.
 function mapLetterTypeToBucket(internal, docText) {
   const t = (docText || '').toLowerCase();
-  const B_HOSP='Hospital Discharge Summary (after admission into hospital)';
-  const B_CLIN='Clinical Letters/Report (after visiting specialists)';
-  const B_111 ='111 Report (seeking advise from Clinician over phone)';
-  const B_ED  ='Accident & Emergency Department report';
-  const B_AMB ='Ambulance Report (When emergency services are called)';
-  const B_PRIV='Private Specialists clinical letter';
-  const B_EXT ='External service providers (Boots, Spec savers – for Eye & ENT)';
-  const B_DES ='Diabetic eye screening reports';
-  const B_OOH ='Out of hours (East Berkshire Primary Care)';
-  const B_MISC='Miscellaneous';
+  const B = getLetterTypeBuckets();
 
   const desCues = ['diabetic eye screening','nhs diabetic eye','retinopathy screening',
                    'grading digital images','des service','des programme','screening outcome'];
-  if (desCues.some(c => t.includes(c))) return B_DES;
+  if (desCues.some(c => t.includes(c))) return B.DES;
 
   const oohCues = ['out of hours','out-of-hours','gp out of hours','ic24','voddoc',
                    'east berkshire primary care','brants bridge','wokingham ooh',
                    'primary care out of hours'];
   const oohCandidateInternals = ['Clinical Letter','Outpatient Letter','Referral Letter',
                                  'Medication Request','Procedure Report'];
-  if (oohCues.some(c => t.includes(c)) && oohCandidateInternals.includes(internal)) return B_OOH;
+  if (oohCues.some(c => t.includes(c)) && oohCandidateInternals.includes(internal)) return B.OOH;
 
   const hosp = new Set(['Discharge Summary','Mental Health Inpatient Discharge',
                         'Antenatal Discharge Summary','CAMHS Discharge Summary']);
-  if (hosp.has(internal)) return B_HOSP;
-  if (internal === 'ED Discharge Letter') return B_ED;
-  if (internal === '111 First ED Report') return B_111;
-  if (internal === 'Ambulance Clinical Report') return B_AMB;
-  if (internal === 'Ophthalmology Referral') return B_EXT;
-  if (internal === 'Ophthalmology Letter') return B_DES;
-  if (internal === 'Medication / Prescriber Letter') return B_PRIV;
-  if (internal === 'Medication Request') return B_MISC;
+  if (hosp.has(internal)) return B.HOSP;
+  if (internal === 'ED Discharge Letter') return B.ED;
+  if (internal === '111 First ED Report') return B['111'];
+  if (internal === 'Ambulance Clinical Report') return B.AMB;
+  if (internal === 'Ophthalmology Referral') return B.EXT;
+  if (internal === 'Ophthalmology Letter') return B.DES;
+  if (internal === 'Medication / Prescriber Letter') return B.PRIV;
+  if (internal === 'Medication Request') return B.MISC;
 
   const clin = new Set(['Referral Letter','Outpatient Letter','Clinical Letter',
     'Cancer Surveillance Letter','HIV / GUM Clinic Letter','Maternity / Diabetes Letter',
@@ -3132,9 +3156,12 @@ function mapLetterTypeToBucket(internal, docText) {
     'Renal / Nephrology Letter','Paediatric Cardiology Letter',
     'Early Pregnancy / Gynaecology Letter','Pre-admission Letter',
     'Haematology Outpatient Letter']);
-  if (clin.has(internal)) return B_CLIN;
+  if (clin.has(internal)) return B.CLIN;
 
-  return B_MISC;
+  // No signal from the pipeline or document cues: return an empty bucket so
+  // the caller can avoid silently auto-selecting a dropdown option.
+  if (!internal) return '';
+  return B.MISC;
 }
 
 function copyPageLink() {
